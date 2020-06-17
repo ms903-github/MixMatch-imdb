@@ -19,16 +19,19 @@ import torch.nn.functional as F
 
 import models.wideresnet as models
 import dataset.cifar10 as dataset
+import dataset.imdb as imdbdataset
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from tensorboardX import SummaryWriter
 
 parser = argparse.ArgumentParser(description='PyTorch MixMatch Training')
+# Data selection
+parser.add_argument('--data', default='cifar10', type=str, help='choose data type')
 # Optimization options
 parser.add_argument('--epochs', default=1024, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('--batch-size', default=64, type=int, metavar='N',
+parser.add_argument('--batch-size', default=128, type=int, metavar='N',
                     help='train batchsize')
 parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                     metavar='LR', help='initial learning rate')
@@ -41,7 +44,7 @@ parser.add_argument('--manualSeed', type=int, default=0, help='manual seed')
 parser.add_argument('--gpu', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
 #Method options
-parser.add_argument('--n-labeled', type=int, default=250,
+parser.add_argument('--n_labeled', type=int, default=250,
                         help='Number of labeled data')
 parser.add_argument('--val-iteration', type=int, default=1024,
                         help='Number of labeled data')
@@ -74,28 +77,52 @@ def main():
         mkdir_p(args.out)
 
     # Data
-    print(f'==> Preparing cifar10')
-    transform_train = transforms.Compose([
-        dataset.RandomPadandCrop(32),
-        dataset.RandomFlip(),
-        dataset.ToTensor(),
-    ])
+    if args.data == 'cifar10':
+        print(f'==> Preparing cifar10')
+        transform_train = transforms.Compose([
+            dataset.RandomPadandCrop(32),
+            dataset.RandomFlip(),
+            dataset.ToTensor(),
+        ])
 
-    transform_val = transforms.Compose([
-        dataset.ToTensor(),
-    ])
+        transform_val = transforms.Compose([
+            dataset.ToTensor(),
+        ])
 
-    train_labeled_set, train_unlabeled_set, val_set, test_set = dataset.get_cifar10('./data', args.n_labeled, transform_train=transform_train, transform_val=transform_val)
-    labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-    unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-    val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
-    test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        train_labeled_set, train_unlabeled_set, val_set, test_set = dataset.get_cifar10('./data', args.n_labeled, transform_train=transform_train, transform_val=transform_val)
+        labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+        unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+        val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        n_class = 10
+    elif args.data == 'imdb':
+        print(f'==> Preparing imdb')
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+        ])
+
+        transform_val = transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.ToTensor(),
+        ])
+
+        train_labeled_set, train_unlabeled_set, val_set, test_set = imdbdataset.get_imdb('./data/imdb_tr_fair.txt', './data/imdb_te.txt', args.n_labeled, transform_train=transform_train, transform_val=transform_val)
+        labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+        unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+        val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        n_class = 2
 
     # Model
     print("==> creating WRN-28-2")
 
-    def create_model(ema=False):
-        model = models.WideResNet(num_classes=10)
+    def create_model(args, ema=False):
+        if args.data == 'cifar10':
+            model = models.WideResNet(num_classes=n_class)
+        elif args.data == 'imdb':
+            model = models.WideResNetForImdb(num_classes=n_class)
         model = model.cuda()
 
         if ema:
@@ -104,8 +131,8 @@ def main():
 
         return model
 
-    model = create_model()
-    ema_model = create_model(ema=True)
+    model = create_model(args)
+    ema_model = create_model(args, ema=True)
 
     cudnn.benchmark = True
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
@@ -143,7 +170,7 @@ def main():
 
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
-        train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda)
+        train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda, n_class)
         _, train_acc = validate(labeled_trainloader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
         val_loss, val_acc = validate(val_loader, ema_model, criterion, epoch, use_cuda, mode='Valid Stats')
         test_loss, test_acc = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
@@ -183,7 +210,7 @@ def main():
     print(np.mean(test_accs[-20:]))
 
 
-def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, criterion, epoch, use_cuda):
+def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, criterion, epoch, use_cuda, n_class):
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -209,7 +236,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             (inputs_u, inputs_u2), _ = unlabeled_train_iter.next()
         except:
             unlabeled_train_iter = iter(unlabeled_trainloader)
-            (inputs_u, inputs_u2), _ = unlabeled_train_iter.next()
+            # print(unlabeled_train_iter.next())
+            inputs_u, inputs_u2 = unlabeled_train_iter.next()
 
         # measure data loading time
         data_time.update(time.time() - end)
@@ -217,7 +245,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         batch_size = inputs_x.size(0)
 
         # Transform label to one-hot
-        targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1), 1)
+        targets_x = torch.zeros(batch_size, n_class).scatter_(1, targets_x.view(-1,1), 1)
 
         if use_cuda:
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda(non_blocking=True)
@@ -237,16 +265,14 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # mixup
         all_inputs = torch.cat([inputs_x, inputs_u, inputs_u2], dim=0)
         all_targets = torch.cat([targets_x, targets_u, targets_u], dim=0)
-
         l = np.random.beta(args.alpha, args.alpha)
 
         l = max(l, 1-l)
 
         idx = torch.randperm(all_inputs.size(0))
-
         input_a, input_b = all_inputs, all_inputs[idx]
         target_a, target_b = all_targets, all_targets[idx]
-
+        
         mixed_input = l * input_a + (1 - l) * input_b
         mixed_target = l * target_a + (1 - l) * target_b
 
@@ -326,10 +352,10 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
             loss = criterion(outputs, targets)
 
             # measure accuracy and record loss
-            prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
+            prec1, prec5 = accuracy(outputs, targets, topk=(1, 1))
             losses.update(loss.item(), inputs.size(0))
             top1.update(prec1.item(), inputs.size(0))
-            top5.update(prec5.item(), inputs.size(0))
+            # top5.update(prec5.item(), inputs.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -345,7 +371,8 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
                         eta=bar.eta_td,
                         loss=losses.avg,
                         top1=top1.avg,
-                        top5=top5.avg,
+                        top5=0
+                        # top5=top5.avg,
                         )
             bar.next()
         bar.finish()
@@ -388,6 +415,11 @@ class WeightEMA(object):
     def step(self):
         one_minus_alpha = 1.0 - self.alpha
         for param, ema_param in zip(self.params, self.ema_params):
+            # some of the param, ema_param are int64, while others are float32?
+            # print("ema:{}".format(ema_param.dtype))
+            # print("param:{}".format(param.dtype))
+            ema_param = ema_param.float()
+            param = param.float()
             ema_param.mul_(self.alpha)
             ema_param.add_(param * one_minus_alpha)
             # customized weight decay
